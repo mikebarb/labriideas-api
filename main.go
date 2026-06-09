@@ -645,7 +645,25 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Allow requests from your Astro frontend
 		//w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Origin", "http://localhost:4321")
+		//w.Header().Set("Access-Control-Allow-Origin", "https://labriideas.pages.dev")
+		//w.Header().Set("Access-Control-Allow-Origin", "http://localhost:4321")
+
+		// 1. Define your allowed origins
+		allowedOrigins := []string{
+			"http://localhost:4321",        // Local Development
+			"https://labriideas.pages.dev", // Production Cloudflare Site
+		}
+
+		// 2. Get the origin from the incoming request
+		origin := r.Header.Get("Origin")
+
+		// 3. If the origin is in our allowed list, reflect it back exactly
+		for _, allowed := range allowedOrigins {
+			if origin == allowed {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				break
+			}
+		}
 
 		// 2. Allow the methods we use
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
