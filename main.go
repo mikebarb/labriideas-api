@@ -131,7 +131,7 @@ func main() {
 
 	// 4. Start the server using the dynamic port
 	// Notice we use ":" + port, not ":8080"
-	if err := http.ListenAndServe(":"+port, nil); err != nil {
+	if err := http.ListenAndServe(":"+port, mux); err != nil {
 		log.Fatalf("Server failed: %v", err)
 	}
 
@@ -139,8 +139,9 @@ func main() {
 
 // --- CATALOG HANDLER ---
 func catalogHandler(w http.ResponseWriter, r *http.Request) {
+	//log.Println("called catalogHandler")
 	clientVersion := r.URL.Query().Get("version")
-	fmt.Printf("catalogHandler - clientVersion: %s\n", clientVersion)
+	//fmt.Printf("catalogHandler - clientVersion: %s\n", clientVersion)
 	ctx := r.Context()
 
 	// 1. Ask R2 for the current ETag (The Source of Truth)
@@ -151,10 +152,10 @@ func catalogHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r2ETag := *head.ETag
-	fmt.Printf("catalogHandler - r2ETag: %s\n", r2ETag)
+	//fmt.Printf("catalogHandler - r2ETag: %s\n", r2ETag)
 	// 2. If client version matches R2 ETag, they are up to date!
 	if clientVersion == r2ETag {
-		fmt.Println("catalogHandler - client is up to date")
+		//fmt.Println("catalogHandler - client is up to date")
 		w.WriteHeader(http.StatusNotModified) // 304
 		return
 	}
@@ -164,7 +165,7 @@ func catalogHandler(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("catalogHandler - cachedETag: %s\n", cachedETag)
 	// 4. If Go Cache is stale or empty, fetch fresh bytes from R2
 	if cachedETag != r2ETag || len(cachedBytes) == 0 {
-		log.Println("Go Server Cache Miss. Fetching catalog from R2...")
+		//log.Println("Go Server Cache Miss. Fetching catalog from R2...")
 		fmt.Printf("catalogHandler - Go Server Cache Miss. Fetching catalog from R2...\n")
 		freshBytes, err := storageClient.GetObjectBytes(ctx, "catalog.json.gz")
 		if err != nil {
@@ -640,6 +641,7 @@ func crawlStatusHandler(w http.ResponseWriter, r *http.Request) {
 // --- MIDDLEWARE ---
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
+	log.Println("corsMiddleware called.")
 	return func(w http.ResponseWriter, r *http.Request) {
 		// 1. Allow requests from your Astro frontend
 		w.Header().Set("Access-Control-Allow-Origin", "*")
