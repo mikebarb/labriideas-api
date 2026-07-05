@@ -97,6 +97,7 @@ func main() {
 	mux.HandleFunc("/api/get-upload-url", corsMiddleware(getSignedUploadURLHandler))
 	mux.HandleFunc("/api/start-crawl", corsMiddleware(startCrawlHandler))
 	mux.HandleFunc("/api/crawl-status", corsMiddleware(crawlStatusHandler))
+	mux.HandleFunc("/api/delete-track", corsMiddleware(deleteTrackHandler))
 
 	// BACKGROUND CACHE WARMUP
 	go func() {
@@ -162,11 +163,9 @@ func catalogHandler(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Client needs an update. Let's check our Go Server Cache.
 	cachedETag, cachedBytes := catalogCache.Get()
-	fmt.Printf("catalogHandler - cachedETag: %s\n", cachedETag)
 	// 4. If Go Cache is stale or empty, fetch fresh bytes from R2
 	if cachedETag != r2ETag || len(cachedBytes) == 0 {
 		//log.Println("Go Server Cache Miss. Fetching catalog from R2...")
-		fmt.Printf("catalogHandler - Go Server Cache Miss. Fetching catalog from R2...\n")
 		freshBytes, err := storageClient.GetObjectBytes(ctx, "catalog.json.gz")
 		if err != nil {
 			http.Error(w, "Failed to fetch catalog", http.StatusInternalServerError)
@@ -176,11 +175,9 @@ func catalogHandler(w http.ResponseWriter, r *http.Request) {
 		catalogCache.Update(r2ETag, freshBytes)
 		cachedETag = r2ETag
 		cachedBytes = freshBytes
-		fmt.Printf("catalogHandler - Updated server cache\n")
 	}
 
 	// 5. Stream the compressed bytes to the client
-	fmt.Printf("catalogHandler - Stream catalogue to client\n")
 	// CHANGED: Tell the browser it's a binary blob, NOT auto-decompressing gzip
 	w.Header().Set("Content-Type", "application/octet-stream")
 	// REMOVED: w.Header().Set("Content-Encoding", "gzip")
@@ -371,6 +368,138 @@ func updateMetadataHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Return Success
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+}
+
+// deleteTrackHandler deletes a single track from R2 and hot‑patches catalog.json.gz.
+func deleteTrackHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Filename string `json:"filename"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.Filename == "" {
+		http.Error(w, "Filename is required", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	// 1. Delete the object from R2
+	err := storageClient.DeleteObject(ctx, req.Filename)
+	if err != nil {
+		log.Printf("Failed to delete %s from R2: %v", req.Filename, err)
+		http.Error(w, "Failed to delete from R2", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Hot‑patch catalog.json.gz – remove the entry
+	r2Head, err := storageClient.GetMetadata(ctx, "catalog.json.gz")
+	if err != nil {
+		log.Printf("Warning: Could not check catalog ETag after delete: %v", err)
+		catalogCache.Clear()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+		return
+	}
+	r2Etag := *r2Head.ETag
+
+	var catalogGzBytes []byte
+	ramEtag, ramBytes := catalogCache.Get()
+
+	if ramEtag == r2Etag && len(ramBytes) > 0 {
+		catalogGzBytes = ramBytes
+	} else {
+		log.Println("Cache stale during delete. Fetching fresh catalog from R2.")
+		freshBytes, err := storageClient.GetObjectBytes(ctx, "catalog.json.gz")
+		if err != nil {
+			log.Printf("Warning: Could not fetch fresh catalog: %v", err)
+			catalogCache.Clear()
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+			return
+		}
+		catalogGzBytes = freshBytes
+	}
+
+	// Decompress
+	gzReader, err := gzip.NewReader(bytes.NewReader(catalogGzBytes))
+	if err != nil {
+		log.Printf("Warning: gzip error: %v", err)
+		catalogCache.Clear()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+		return
+	}
+	jsonBytes, err := io.ReadAll(gzReader)
+	gzReader.Close()
+	if err != nil {
+		log.Printf("Warning: failed to read decompressed catalog: %v", err)
+		catalogCache.Clear()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+		return
+	}
+
+	var catalogData map[string]interface{}
+	if err := json.Unmarshal(jsonBytes, &catalogData); err != nil {
+		log.Printf("Warning: JSON unmarshal error: %v", err)
+		catalogCache.Clear()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+		return
+	}
+
+	// Remove the track with matching filename
+	if tracks, ok := catalogData["tracks"].([]interface{}); ok {
+		updatedTracks := make([]interface{}, 0, len(tracks))
+		for _, t := range tracks {
+			if trackMap, ok := t.(map[string]interface{}); ok {
+				if trackMap["filename"] == req.Filename {
+					continue // skip this one – it's being deleted
+				}
+			}
+			updatedTracks = append(updatedTracks, t)
+		}
+		catalogData["tracks"] = updatedTracks
+		catalogData["count"] = len(updatedTracks)
+	}
+
+	// Re‑marshal and re‑compress
+	newJsonBytes, err := json.Marshal(catalogData)
+	if err != nil {
+		log.Printf("Warning: marshal error after delete: %v", err)
+		catalogCache.Clear()
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "success"})
+		return
+	}
+	var buf bytes.Buffer
+	gzWriter := gzip.NewWriter(&buf)
+	gzWriter.Write(newJsonBytes)
+	gzWriter.Close()
+	newGzBytes := buf.Bytes()
+
+	// Upload updated catalog and update RAM cache
+	err = storageClient.PutObjectBytes(ctx, "catalog.json.gz", newGzBytes)
+	if err != nil {
+		log.Printf("Warning: Failed to upload patched catalog: %v", err)
+	}
+	newHead, _ := storageClient.GetMetadata(ctx, "catalog.json.gz")
+	newEtag := ""
+	if newHead != nil {
+		newEtag = *newHead.ETag
+	}
+	catalogCache.Update(newEtag, newGzBytes)
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }

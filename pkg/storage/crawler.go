@@ -1,9 +1,13 @@
 package storage
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -12,6 +16,55 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
+
+// DecodeEncodedWord decodes RFC 2047 encoded-word values within a string.
+// Handles both fully-encoded strings and partial encodings like
+// "Hello =?utf-8?Q?World=3F?=" → "Hello World?"
+
+var encodedWordRegex = regexp.MustCompile(`=\?([^?]+)\?([QqBb])\?([^?]*)\?=`)
+
+func DecodeEncodedWord(s string) string {
+	return encodedWordRegex.ReplaceAllStringFunc(s, func(match string) string {
+		sub := encodedWordRegex.FindStringSubmatch(match)
+		if len(sub) != 4 {
+			return match
+		}
+		charset, encoding, text := sub[1], strings.ToLower(sub[2]), sub[3]
+
+		// Only handle utf-8
+		if charset != "utf-8" && charset != "UTF-8" {
+			return match
+		}
+
+		switch encoding {
+		case "q":
+			return decodeQString(text)
+		case "b":
+			if data, err := base64.StdEncoding.DecodeString(text); err == nil {
+				return string(data)
+			}
+		}
+		return match
+	})
+}
+
+func decodeQString(text string) string {
+	text = strings.ReplaceAll(text, "_", " ")
+	var buf bytes.Buffer
+	for i := 0; i < len(text); i++ {
+		if text[i] == '=' && i+2 < len(text) {
+
+			hex := text[i+1 : i+3]
+			if b, err := strconv.ParseUint(hex, 16, 8); err == nil {
+				buf.WriteByte(byte(b))
+				i += 2
+				continue
+			}
+		}
+		buf.WriteByte(text[i])
+	}
+	return buf.String()
+}
 
 // CrawlProgress holds the data sent back to the server during a crawl
 type CrawlProgress struct {
@@ -97,7 +150,8 @@ func (c *Client) CrawlCatalog(ctx context.Context, progressChan chan<- CrawlProg
 				default:
 					// For everything else (title, artist, future fields), grab from custom metadata
 					// R2 normalizes metadata keys to lowercase, which perfectly matches our lowercase schema
-					trackData[fieldName] = headOutput.Metadata[fieldName]
+					//trackData[fieldName] = headOutput.Metadata[fieldName]
+					trackData[fieldName] = DecodeEncodedWord(headOutput.Metadata[fieldName])
 				}
 			}
 

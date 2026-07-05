@@ -1,0 +1,7 @@
+2026/07/04 21:44:07 📝 Logging to: C:\Users\Barbara\docker\labriideas\publisher\cmd\csv-reformatter\labriideas-2026-07-04_21-44-07.log
+2026/07/04 21:44:07 Input file: C:\Users\Barbara\labri_other_files\enriched_catalog_matched.csv
+2026/07/04 21:44:07 --- Reading input CSV ---
+2026/07/04 21:44:07 ✅ Loaded 2018 rows from input.
+2026/07/04 21:44:07 --- Writing reformatted CSV to C:\Users\Barbara\labri_other_files\enriched_catalog_matched_reformatted_2026-07-04_21-44-07.csv ---
+2026/07/04 21:44:07 ✅ Reformatted 2018 rows.
+2026/07/04 21:44:07 ✅ Output: C:\Users\Barbara\labri_other_files\enriched_catalog_matched_reformatted_2026-07-04_21-44-07.csv

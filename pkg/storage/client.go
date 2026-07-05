@@ -90,7 +90,7 @@ func (c *Client) GetObjectBytes(ctx context.Context, key string) ([]byte, error)
 
 // UpdateMetadata replaces the custom metadata for an existing object in R2
 // R2 does not allow patching metadata directly; we must copy the object over itself
-func (c *Client) UpdateMetadata(ctx context.Context, filename string, metadata map[string]string) error {
+func (c *Client) UpdateMetadata_OLD(ctx context.Context, filename string, metadata map[string]string) error {
 	// URL-encode the filename! Spaces must become %20 for the S3 CopySource header
 	encodedFilename := url.PathEscape(filename)
 
@@ -106,6 +106,48 @@ func (c *Client) UpdateMetadata(ctx context.Context, filename string, metadata m
 		MetadataDirective: types.MetadataDirectiveReplace,
 	})
 
+	return err
+}
+
+// UpdateMetadata replaces the custom metadata for an existing object in R2.
+//
+// Implementation note: we read the object and re-Put it with the new metadata
+// rather than using CopyObject with MetadataDirective=REPLACE. Some R2/S3
+// implementations apply RFC 2047 encoded-word encoding to metadata values
+// during CopyObject, corrupting punctuation like '?' into '=3F'.
+// PutObject preserves the bytes verbatim.
+func (c *Client) UpdateMetadata(ctx context.Context, filename string, metadata map[string]string) error {
+	// 1. Read current metadata so we preserve fields we're not updating
+	head, err := c.s3.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(c.bucket),
+		Key:    aws.String(filename),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to read current metadata for %s: %w", filename, err)
+	}
+
+	// 2. Merge: new values win, but preserve any existing fields not in the update map
+	merged := make(map[string]string)
+	for k, v := range head.Metadata {
+		merged[k] = v
+	}
+	for k, v := range metadata {
+		merged[k] = v
+	}
+
+	// 3. Get the bytes
+	data, err := c.GetObjectBytes(ctx, filename)
+	if err != nil {
+		return fmt.Errorf("failed to read %s for metadata update: %w", filename, err)
+	}
+
+	// 4. Re-upload with merged metadata
+	_, err = c.s3.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:   aws.String(c.bucket),
+		Key:      aws.String(filename),
+		Body:     bytes.NewReader(data),
+		Metadata: merged,
+	})
 	return err
 }
 
