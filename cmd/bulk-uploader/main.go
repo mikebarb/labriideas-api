@@ -31,7 +31,7 @@ func main() {
 	// INPUT: csv file to read from for bulk delete
 	//        location of audio mp3 files on disk
 	// ==============================================
-	csvPath := `C:\Users\Barbara\labri_other_files\enriched_catalog_matched.csv`
+	csvPath := `C:\Users\Barbara\labri_other_files\playlist_additions.csv`
 	audioDirPath := `C:\Users\Barbara\labri_audio_files`
 
 	// ===================================================

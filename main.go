@@ -10,8 +10,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -21,6 +24,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/mikebarb/labriideas-publisher/pkg/cache"
+	"github.com/mikebarb/labriideas-publisher/pkg/schema"
 	"github.com/mikebarb/labriideas-publisher/pkg/storage"
 )
 
@@ -57,6 +61,14 @@ func main() {
 	if err != nil {
 		log.Println("No .env file found, relying on system env vars")
 	}
+	// --- NEW: Initialize Auth system ---
+	InitAuth()
+	if len(adminPasswords()) == 0 {
+		log.Println("⚠️  WARNING: ADMIN_PASSWORDS is empty — browser login will fail.")
+	}
+	if len(adminAPITokens()) == 0 {
+		log.Println("⚠️  WARNING: ADMIN_API_TOKENS is empty — CLI tools will be rejected.")
+	}
 
 	accessKey := os.Getenv("R2_ACCESS_KEY_ID")
 	secretKey := os.Getenv("R2_SECRET_ACCESS_KEY")
@@ -89,15 +101,25 @@ func main() {
 
 	// Setup HTTP Routes
 	mux := http.NewServeMux()
-	mux.HandleFunc("/api/download", corsMiddleware(downloadHandler))
-	mux.HandleFunc("/api/upload", corsMiddleware(uploadHandler))
+
+	// --- Public endpoints (no token required) ---
 	mux.HandleFunc("/api/catalog", corsMiddleware(catalogHandler))
-	mux.HandleFunc("/api/update-metadata", corsMiddleware(updateMetadataHandler))
-	mux.HandleFunc("/api/upload-track", corsMiddleware(uploadTrackHandler))
-	mux.HandleFunc("/api/get-upload-url", corsMiddleware(getSignedUploadURLHandler))
-	mux.HandleFunc("/api/start-crawl", corsMiddleware(startCrawlHandler))
-	mux.HandleFunc("/api/crawl-status", corsMiddleware(crawlStatusHandler))
-	mux.HandleFunc("/api/delete-track", corsMiddleware(deleteTrackHandler))
+	mux.HandleFunc("/api/download", corsMiddleware(downloadHandler))
+
+	// --- Auth endpoints (must be reachable without a token) ---
+	mux.HandleFunc("/api/auth/login", corsMiddleware(loginHandler))
+	mux.HandleFunc("/api/auth/logout", corsMiddleware(logoutHandler))
+	mux.HandleFunc("/api/auth/status", corsMiddleware(authStatusHandler))
+
+	// --- Admin endpoints (Protected: Bearer token or Cookie session required) ---
+	// Middleware order: CORS runs first (handles headers/preflight), then Auth (gates access)
+	mux.HandleFunc("/api/upload", corsMiddleware(authMiddleware(uploadHandler)))
+	mux.HandleFunc("/api/upload-track", corsMiddleware(authMiddleware(uploadTrackHandler)))
+	mux.HandleFunc("/api/update-metadata", corsMiddleware(authMiddleware(updateMetadataHandler)))
+	mux.HandleFunc("/api/delete-track", corsMiddleware(authMiddleware(deleteTrackHandler)))
+	mux.HandleFunc("/api/get-upload-url", corsMiddleware(authMiddleware(getSignedUploadURLHandler)))
+	mux.HandleFunc("/api/start-crawl", corsMiddleware(authMiddleware(startCrawlHandler)))
+	mux.HandleFunc("/api/crawl-status", corsMiddleware(authMiddleware(crawlStatusHandler)))
 
 	// BACKGROUND CACHE WARMUP
 	go func() {
@@ -124,18 +146,77 @@ func main() {
 		log.Println("✅ Catalog cache warmed up successfully!")
 	}()
 
-	// 3. Log the correct local URL
-	log.Printf("🚀 Server starting on http://localhost:%s", port)
+	// --- Statistics collector: periodic flush to R2, final flush on shutdown ---
+	// NOTE: signal.NotifyContext CAPTURES SIGINT/SIGTERM — once registered,
+	// Ctrl+C no longer terminates the process by default. The signal only
+	// cancels statsCtx. Therefore main() must observe the shutdown and stop
+	// the HTTP server itself (below), or the process hangs forever with the
+	// port held open. This is the whole point of the select at the end.
+	statsCtx, statsStop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer statsStop()
 
-	//log.Println("🚀 Server starting on http://localhost:8080")
-	//log.Fatal(http.ListenAndServe(":8080", mux))
+	// statsDone closes AFTER StartStatsLoop's final flush completes — main
+	// waits on it so the server isn't killed mid-flush.
+	//statsDone := make(chan struct{})
+	//go func() {
+	//	StartStatsLoop(statsCtx) // returns after final flush on shutdown
+	//	close(statsDone)
+	//}()
 
-	// 4. Start the server using the dynamic port
-	// Notice we use ":" + port, not ":8080"
-	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatalf("Server failed: %v", err)
+	// statsDone receives the final flush outcome (true = flushed, false =
+	// requeued/failed) when StartStatsLoop returns on shutdown — main waits
+	// on it so the server isn't torn down mid-flush, and uses the result
+	// for an honest shutdown message.
+	statsDone := make(chan bool, 1)
+	go func() {
+		ok := StartStatsLoop(statsCtx) // true if final flush succeeded
+		statsDone <- ok
+	}()
+
+	// CHANGED: http.Server instead of http.ListenAndServe — Shutdown()
+	// requires a server object; the package-level function can't be stopped.
+	srv := &http.Server{Addr: ":" + port, Handler: mux}
+
+	// Run the server in a goroutine so main can supervise both the server
+	// and the shutdown signal.
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-serverErr:
+		// The server failed on its own (port bind error, etc.) — fatal.
+		// ErrServerClosed is the normal return from Shutdown() and is NOT
+		// an error.
+		if err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server failed: %v", err)
+		}
+	//case <-statsDone:
+	// Signal received AND final stats flush complete. Now stop the
+	// HTTP server: Shutdown closes the listener (main's select would
+	// otherwise block on it) and waits up to 5s for in-flight requests
+	// to finish before returning. Then main returns → process exits.
+	//	log.Println("🛑 Shutting down (stats flushed)...")
+	//	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	//	defer cancel()
+	//	if err := srv.Shutdown(shutdownCtx); err != nil {
+	//		log.Printf("Forcing listener close: %v", err)
+	//	}
+	case flushed := <-statsDone:
+		// Signal received AND final stats flush ATTEMPT completed. Now stop
+		// the HTTP server: Shutdown closes the listener (main's select
+		// would otherwise block on it) and waits up to 5s for in-flight
+		// requests to finish before returning. Then main returns → exit.
+		if flushed {
+			log.Println("🛑 Shutting down (stats flushed)...")
+		} else {
+			log.Println("🛑 Shutting down (stats flush failed — events requeued, will be lost at exit)...")
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("Forcing listener close: %v", err)
+		}
 	}
-
 }
 
 // --- CATALOG HANDLER ---
@@ -208,6 +289,11 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Usage statistics: what was requested, from where, when. The primary
+	// public-usage signal. Catalog fetches are deliberately NOT logged —
+	// they fire on every page load and would be pure noise.
+	stats.Record(Event{Kind: "track_download", File: fileName, IP: clientIP(r)})
+
 	response := map[string]string{"url": url}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
@@ -271,6 +357,29 @@ func updateMetadataHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// ─── INSERT 1: SCHEMA ENFORCEMENT (the boundary of truth) ───
+	// Filter the incoming metadata against CatalogSchema BEFORE it reaches
+	// either write path below. This single filter covers both consumers of
+	// req.Metadata: the R2 Copy-Over-Self update (step 1) AND the
+	// catalog.json.gz hot-patch (step F). Any field not defined in
+	// schema.go — runtime fields like position/isActive/url sent by older
+	// editor versions, or anything a crafted request injects — is
+	// silently dropped here and can never reach R2 or the catalog.
+	// (This was the primary pollution vector: step F previously wrote
+	// every incoming key straight into catalog.json.gz, which every
+	// visitor downloads.)
+	//
+	// NOTE: the storage layer additionally filters the MERGED metadata
+	// (purging historical pollution already stored in R2); this filter
+	// stops NEW pollution early, before any R2 I/O is spent on it.
+	filtered := make(map[string]string, len(req.Metadata))
+	for _, field := range schema.CatalogSchema {
+		if v, ok := req.Metadata[field]; ok {
+			filtered[field] = v
+		}
+	}
+	req.Metadata = filtered
+
 	ctx := r.Context()
 
 	// 1. Update the MP3's metadata in R2
@@ -330,6 +439,21 @@ func updateMetadataHandler(w http.ResponseWriter, r *http.Request) {
 					for _, t := range tracks {
 						if trackMap, ok := t.(map[string]interface{}); ok {
 							if trackMap["filename"] == req.Filename {
+								// ─── INSERT 2: SCHEMA PURGE (self-heal) ───
+								// Remove any non-schema fields from this track
+								// before applying the update. Historical pollution
+								// (runtime fields written by older editor versions)
+								// is cleaned permanently: each admin edit of a track
+								// also heals its catalog entry. Safe for the catalog:
+								// 'filename' and 'hash' ARE in CatalogSchema, so the
+								// catalog keeps its keys — anything else on this
+								// track was pollution by definition.
+								for k := range trackMap {
+									if !slices.Contains(schema.CatalogSchema, k) {
+										delete(trackMap, k)
+									}
+								}
+
 								for key, value := range req.Metadata {
 									trackMap[key] = value
 								}
@@ -545,6 +669,16 @@ func uploadTrackHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid metadata JSON", http.StatusBadRequest)
 		return
 	}
+
+	// ─── INSERT: SCHEMA ENFORCEMENT ───
+	filtered := make(map[string]string, len(req.Metadata))
+	for _, field := range schema.CatalogSchema {
+		if v, ok := req.Metadata[field]; ok {
+			filtered[field] = v
+		}
+	}
+	req.Metadata = filtered
+	// ─── END INSERT ───
 
 	// 4. Upload the file to R2 with custom metadata
 	err = storageClient.PutObjectWithMetadata(ctx, req.Filename, fileBytes, req.Metadata)
@@ -770,23 +904,20 @@ func crawlStatusHandler(w http.ResponseWriter, r *http.Request) {
 // --- MIDDLEWARE ---
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
-	log.Println("corsMiddleware called.")
 	return func(w http.ResponseWriter, r *http.Request) {
-		// 1. Allow requests from your Astro frontend
-		//w.Header().Set("Access-Control-Allow-Origin", "*")
-		//w.Header().Set("Access-Control-Allow-Origin", "https://labriideas.pages.dev")
-		//w.Header().Set("Access-Control-Allow-Origin", "http://localhost:4321")
-
 		// 1. Define your allowed origins
 		allowedOrigins := []string{
 			"http://localhost:4321",        // Local Development
 			"https://labriideas.pages.dev", // Production Cloudflare Site
 		}
 
-		// 2. Get the origin from the incoming request
+		// 2. Get the origin from the incoming request; if it is in our
+		//    allow-list, reflect it back exactly. Unlisted origins get
+		//    no ACAO header at all — the browser then blocks the
+		//    response, which is the CORS layer doing its (limited) job.
+		//    NOTE: CORS is a browser convenience, NOT the security
+		//    boundary — authMiddleware is. curl ignores CORS entirely.
 		origin := r.Header.Get("Origin")
-
-		// 3. If the origin is in our allowed list, reflect it back exactly
 		for _, allowed := range allowedOrigins {
 			if origin == allowed {
 				w.Header().Set("Access-Control-Allow-Origin", origin)
@@ -794,22 +925,35 @@ func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 
-		// 2. Allow the methods we use
+		// 3. Allow the methods we use
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 
-		// 3. Allow the Content-Type header (Crucial for multipart/form-data)
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		// 4. Allow request headers. CHANGED: added Authorization —
+		//    REQUIRED for the Bearer-token auth overlay. It is a
+		//    non-simple header, so any authed request triggers a
+		//    preflight (OPTIONS); without it listed here the browser
+		//    kills the request client-side (ERR_FAILED) and it never
+		//    reaches authMiddleware at all. Content-Type remains for
+		//    JSON bodies and multipart/form-data uploads.
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
-		// 4. Expose the ETag header so the frontend can read it (for caching)
+		// 5. Expose the ETag header so the frontend can read it (for caching)
 		w.Header().Set("Access-Control-Expose-Headers", "ETag")
 
-		// 5. Intercept the Preflight OPTIONS request and return 204 No Content
+		// 6. Cache the preflight result for a day — the browser stops
+		//    re-sending OPTIONS for repeated uploads/fetches to the
+		//    same route. Free performance win, no behavior change.
+		w.Header().Set("Access-Control-Max-Age", "86400")
+
+		// 7. Intercept the Preflight OPTIONS request and return 204.
+		//    Must stay BEFORE next(w, r): preflights never carry
+		//    credentials by design, so authMiddleware would 401 them.
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
 
-		// 6. Pass normal requests to the actual handler
+		// 8. Pass normal requests to the actual handler
 		next(w, r)
 	}
 }
