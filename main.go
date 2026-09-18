@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,12 +29,17 @@ import (
 	"github.com/mikebarb/labriideas-publisher/pkg/storage"
 )
 
-//"io"
-
-// Global storage client
+// Global storage and cache singletons
 var storageClient *storage.Client
 var catalogCache *cache.CatalogCache
 
+// In-memory store for background crawl tasks
+var jobRegistry sync.Map
+
+// Pre-cached schema bytes served to the frontend editor
+var menuSchemaBytes []byte
+
+// Request Payloads
 type MetadataUpdateRequest struct {
 	Filename string            `json:"filename"`
 	Metadata map[string]string `json:"metadata"`
@@ -53,8 +59,14 @@ type CrawlJob struct {
 	Message  string `json:"message"`
 }
 
-// In-memory store for job statuses
-var jobRegistry sync.Map
+func init() {
+	var err error
+	// Read and verify menu JSON schema at application startup
+	menuSchemaBytes, err = os.ReadFile("pkg/schema/menu.schema.json")
+	if err != nil {
+		log.Printf("⚠️  WARNING: Could not load pkg/schema/menu.schema.json: %v", err)
+	}
+}
 
 func main() {
 	err := godotenv.Load()
@@ -105,6 +117,7 @@ func main() {
 	// --- Public endpoints (no token required) ---
 	mux.HandleFunc("/api/catalog", corsMiddleware(catalogHandler))
 	mux.HandleFunc("/api/download", corsMiddleware(downloadHandler))
+	mux.HandleFunc("/api/schema/menu", corsMiddleware(menuSchemaHandler))
 
 	// --- Auth endpoints (must be reachable without a token) ---
 	mux.HandleFunc("/api/auth/login", corsMiddleware(loginHandler))
@@ -120,6 +133,7 @@ func main() {
 	mux.HandleFunc("/api/get-upload-url", corsMiddleware(authMiddleware(getSignedUploadURLHandler)))
 	mux.HandleFunc("/api/start-crawl", corsMiddleware(authMiddleware(startCrawlHandler)))
 	mux.HandleFunc("/api/crawl-status", corsMiddleware(authMiddleware(crawlStatusHandler)))
+	mux.HandleFunc("/api/update-menu", corsMiddleware(authMiddleware(updateMenuHandler)))
 
 	// BACKGROUND CACHE WARMUP
 	go func() {
@@ -182,13 +196,15 @@ func main() {
 	serverErr := make(chan error, 1)
 	go func() { serverErr <- srv.ListenAndServe() }()
 
+	log.Printf("🚀 Server running on http://localhost:%s", port)
+
 	select {
 	case err := <-serverErr:
 		// The server failed on its own (port bind error, etc.) — fatal.
 		// ErrServerClosed is the normal return from Shutdown() and is NOT
 		// an error.
 		if err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Server failed: %v", err)
+			log.Fatalf("Server listener failed: %v", err)
 		}
 	//case <-statsDone:
 	// Signal received AND final stats flush complete. Now stop the
@@ -207,7 +223,7 @@ func main() {
 		// would otherwise block on it) and waits up to 5s for in-flight
 		// requests to finish before returning. Then main returns → exit.
 		if flushed {
-			log.Println("🛑 Shutting down (stats flushed)...")
+			log.Println("🛑 Shutting down (stats flushed cleanly)...")
 		} else {
 			log.Println("🛑 Shutting down (stats flush failed — events requeued, will be lost at exit)...")
 		}
@@ -219,7 +235,156 @@ func main() {
 	}
 }
 
-// --- CATALOG HANDLER ---
+// =============================================================================
+// HTTP HANDLERS
+// =============================================================================
+
+// --- MENU SCHEMA HANDLER ---
+func menuSchemaHandler(w http.ResponseWriter, r *http.Request) {
+	if len(menuSchemaBytes) == 0 {
+		http.Error(w, "Menu schema not available on server", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(menuSchemaBytes)
+}
+
+// updateMenuHandler acts as the GitOps CI/CD orchestrator. It performs structural
+// sanity checks on incoming menu data and commits it directly to the GitHub repository.
+func updateMenuHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var menuData map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&menuData); err != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
+
+	// ─── STRUCTURAL VALIDATION GATE ───
+	// Verify that critical root keys exist before sending to GitHub.
+	requiredRootKeys := []string{"subMenus", "featuredLectures", "schaefferCollection"}
+	for _, key := range requiredRootKeys {
+		if _, exists := menuData[key]; !exists {
+			http.Error(w, fmt.Sprintf("Schema violation: missing root key '%s'", key), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Verify required sub-menus exist with exact naming.
+	subMenus, ok := menuData["subMenus"].([]interface{})
+	if !ok || len(subMenus) == 0 {
+		http.Error(w, "Schema violation: 'subMenus' must be a non-empty array", http.StatusBadRequest)
+		return
+	}
+
+	requiredSubMenus := []string{"Contact L'Abri", "Playlists", "Topics"}
+	foundSubMenus := make(map[string]bool)
+
+	for _, sm := range subMenus {
+		if smMap, ok := sm.(map[string]interface{}); ok {
+			if name, ok := smMap["subMenu"].(string); ok {
+				foundSubMenus[name] = true
+			}
+		}
+	}
+
+	for _, req := range requiredSubMenus {
+		if !foundSubMenus[req] {
+			http.Error(w, fmt.Sprintf("Critical section missing: 'subMenu': '%s' was not found. Check naming.", req), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// ─── GITHUB API COMMIT PIPELINE ───
+	owner := os.Getenv("GITHUB_OWNER")
+	repo := os.Getenv("GITHUB_REPO")
+	branch := os.Getenv("GITHUB_BRANCH")
+	if branch == "" {
+		branch = "main"
+	}
+	token := os.Getenv("GITHUB_PAT")
+	path := "site/src/data/menu.json"
+
+	if owner == "" || repo == "" || token == "" {
+		log.Println("[ERROR] GitHub configuration missing (GITHUB_OWNER, GITHUB_REPO, or GITHUB_PAT)")
+		http.Error(w, "Server GitHub integration not configured", http.StatusInternalServerError)
+		return
+	}
+
+	// 1. Fetch current file SHA from GitHub
+	getURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s", owner, repo, path, branch)
+	getReq, err := http.NewRequestWithContext(r.Context(), "GET", getURL, nil)
+	if err != nil {
+		http.Error(w, "Failed to create GitHub request", http.StatusInternalServerError)
+		return
+	}
+	getReq.Header.Set("Authorization", "Bearer "+token)
+	getReq.Header.Set("Accept", "application/vnd.github.v3+json")
+
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	getResp, err := httpClient.Do(getReq)
+	if err != nil || getResp.StatusCode != http.StatusOK {
+		log.Printf("GitHub fetch file info failed (status: %d): %v", getResp.StatusCode, err)
+		http.Error(w, "Failed to retrieve current menu state from GitHub", http.StatusBadGateway)
+		return
+	}
+
+	var getResult struct {
+		Sha string `json:"sha"`
+	}
+	json.NewDecoder(getResp.Body).Decode(&getResult)
+	getResp.Body.Close()
+
+	// 2. Format JSON and encode to Base64
+	formattedJSON, err := json.MarshalIndent(menuData, "", "  ")
+	if err != nil {
+		http.Error(w, "Failed to serialize JSON for commit", http.StatusInternalServerError)
+		return
+	}
+	// Append newline to match standard POSIX file conventions
+	formattedJSON = append(formattedJSON, '\n')
+	encodedContent := base64.StdEncoding.EncodeToString(formattedJSON)
+
+	// 3. Send commit PUT request to GitHub
+	putURL := fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s", owner, repo, path)
+	putPayload := map[string]string{
+		"message": "chore(menu): update navigation configuration from admin dashboard",
+		"content": encodedContent,
+		"sha":     getResult.Sha,
+		"branch":  branch,
+	}
+	putBody, _ := json.Marshal(putPayload)
+
+	putReq, err := http.NewRequestWithContext(r.Context(), "PUT", putURL, bytes.NewBuffer(putBody))
+	if err != nil {
+		http.Error(w, "Failed to prepare commit request", http.StatusInternalServerError)
+		return
+	}
+	putReq.Header.Set("Authorization", "Bearer "+token)
+	putReq.Header.Set("Accept", "application/vnd.github.v3+json")
+	putReq.Header.Set("Content-Type", "application/json")
+
+	putResp, err := httpClient.Do(putReq)
+	if err != nil || (putResp.StatusCode != http.StatusOK && putResp.StatusCode != http.StatusCreated) {
+		log.Printf("GitHub commit failed (status: %d): %v", putResp.StatusCode, err)
+		http.Error(w, "Failed to commit changes to GitHub repository", http.StatusBadGateway)
+		return
+	}
+	putResp.Body.Close()
+
+	log.Printf("[ADMIN] Successfully committed updated menu.json to GitHub on branch %s", branch)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "Menu committed successfully. Build triggered on Cloudflare.",
+	})
+}
+
+// catalogHandler streams the compressed catalog.json.gz with 304 ETag revalidation.
 func catalogHandler(w http.ResponseWriter, r *http.Request) {
 	//log.Println("called catalogHandler")
 	clientVersion := r.URL.Query().Get("version")
@@ -249,7 +414,7 @@ func catalogHandler(w http.ResponseWriter, r *http.Request) {
 		//log.Println("Go Server Cache Miss. Fetching catalog from R2...")
 		freshBytes, err := storageClient.GetObjectBytes(ctx, "catalog.json.gz")
 		if err != nil {
-			http.Error(w, "Failed to fetch catalog", http.StatusInternalServerError)
+			http.Error(w, "Failed to fetch catalog from R2", http.StatusInternalServerError)
 			return
 		}
 		// Update the Go Server RAM Cache
@@ -273,6 +438,7 @@ func catalogHandler(w http.ResponseWriter, r *http.Request) {
 
 // --- TRANSPORT LAYER (HTTP Handlers) ---
 
+// downloadHandler generates short-lived presigned URLs for track audio and logs stats.
 func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	fileName := r.URL.Query().Get("file")
 	if fileName == "" {
@@ -285,7 +451,7 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		// Note: The library automatically skips .json files and folders
 		http.Error(w, "Failed to generate signed URL", http.StatusInternalServerError)
-		log.Printf("Error signing URL: %v", err)
+		log.Printf("Error signing downloadURL: %v", err)
 		return
 	}
 
@@ -301,7 +467,7 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
 	// 1. Limit upload size to 50MB to protect your server
-	r.ParseMultipartForm(50 << 20)
+	r.ParseMultipartForm(50 << 20) // 50MB limit
 
 	// 2. Get the file from the form data (key name: "file")
 	file, header, err := r.FormFile("file")
@@ -357,6 +523,7 @@ func updateMetadataHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Schema filtering boundary
 	// ─── INSERT 1: SCHEMA ENFORCEMENT (the boundary of truth) ───
 	// Filter the incoming metadata against CatalogSchema BEFORE it reaches
 	// either write path below. This single filter covers both consumers of
@@ -482,7 +649,7 @@ func updateMetadataHandler(w http.ResponseWriter, r *http.Request) {
 					// J. Update the RAM cache with the new bytes and fetch the NEW R2 ETag
 					newHead, _ := storageClient.GetMetadata(ctx, "catalog.json.gz")
 					newEtag := ""
-					if newHead != nil {
+					if newHead != nil && newHead.ETag != nil {
 						newEtag = *newHead.ETag
 					}
 					catalogCache.Update(newEtag, newGzBytes)
@@ -619,7 +786,7 @@ func deleteTrackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	newHead, _ := storageClient.GetMetadata(ctx, "catalog.json.gz")
 	newEtag := ""
-	if newHead != nil {
+	if newHead != nil && newHead.ETag != nil {
 		newEtag = *newHead.ETag
 	}
 	catalogCache.Update(newEtag, newGzBytes)
@@ -701,7 +868,7 @@ func uploadTrackHandler(w http.ResponseWriter, r *http.Request) {
 	// 6. HOT PATCH: Append the new track to catalog.json.gz
 	r2CatalogHead, _ := storageClient.GetMetadata(ctx, "catalog.json.gz")
 	r2CatalogEtag := ""
-	if r2CatalogHead != nil {
+	if r2CatalogHead != nil && r2CatalogHead.ETag != nil {
 		r2CatalogEtag = *r2CatalogHead.ETag
 	}
 
@@ -751,7 +918,7 @@ func uploadTrackHandler(w http.ResponseWriter, r *http.Request) {
 	storageClient.PutObjectBytes(ctx, "catalog.json.gz", newGzBytes)
 	newCatalogHead, _ := storageClient.GetMetadata(ctx, "catalog.json.gz")
 	newCatalogEtag := ""
-	if newCatalogHead != nil {
+	if newCatalogHead != nil && newCatalogHead.ETag != nil {
 		newCatalogEtag = *newCatalogHead.ETag
 	}
 	catalogCache.Update(newCatalogEtag, newGzBytes)
@@ -871,7 +1038,7 @@ func startCrawlHandler(w http.ResponseWriter, r *http.Request) {
 		ID:       jobID,
 		Status:   "running",
 		Progress: 0,
-		Message:  "Initializing...",
+		Message:  "Initializing crawl...",
 	})
 
 	// Spin up the background worker
@@ -901,7 +1068,9 @@ func crawlStatusHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(job)
 }
 
-// --- MIDDLEWARE ---
+// =============================================================================
+// CORS MIDDLEWARE
+// =============================================================================
 
 func corsMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
