@@ -1,0 +1,247 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://labriideas.pages.dev/schemas/menu.schema.json",
+  "title": "L'Abri Ideas Library - Menu Configuration",
+  "description": "Schema for src/data/menu.json. Defines navigation structure, playlists, topic hierarchy, featured lectures and the Schaeffer collection.",
+  "type": "object",
+  "required": ["subMenus", "featuredLectures", "schaefferCollection"],
+  "additionalProperties": false,
+  "properties": {
+    "subMenus": {
+      "type": "array",
+      "description": "Ordered top-level menu entries. Each entry is a different shape, identified by its subMenu label.",
+      "items": { "$ref": "#/definitions/subMenu" }
+    },
+    "featuredLectures": { "$ref": "#/definitions/featuredLectures" },
+    "schaefferCollection": { "$ref": "#/definitions/schaefferCollection" }
+  },
+
+  "definitions": {
+    "subMenu": {
+      "description": "A top-level menu entry. Exactly one of the three known shapes.",
+      "oneOf": [
+        { "$ref": "#/definitions/contactSubMenu" },
+        { "$ref": "#/definitions/playlistsSubMenu" },
+        { "$ref": "#/definitions/topicsSubMenu" }
+      ]
+    },
+
+    "contactSubMenu": {
+      "type": "object",
+      "title": "Contact L'Abri",
+      "required": ["subMenu", "description", "sites"],
+      "additionalProperties": false,
+      "properties": {
+        "subMenu": { "const": "Contact L'Abri" },
+        "description": { "type": "string", "description": "Intro text shown above the list of centres." },
+        "sites": {
+          "type": "array",
+          "description": "Study centres listed on the Contact page.",
+          "items": { "$ref": "#/definitions/contactSite" }
+        }
+      }
+    },
+
+    "contactSite": {
+      "type": "object",
+      "required": ["id", "title", "details"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "Stable slug used as a key/anchor. Lowercase, hyphenated." },
+        "title": { "type": "string" },
+        "details": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/contactDetail" }
+        }
+      }
+    },
+
+    "contactDetail": {
+      "type": "object",
+      "required": ["label", "value"],
+      "additionalProperties": false,
+      "properties": {
+        "label": { "type": "string", "description": "Left-hand label, e.g. 'Site', 'Email', 'Phone'. May be empty for a continuation row." },
+        "value": { "type": "string", "description": "Displayed value. May be empty for a heading-only row." },
+        "url": { "type": "string", "description": "Optional link target (https:// or mailto:). Omit to render as plain text." },
+        "note": { "type": "string", "description": "Optional qualifier rendered beside the value." }
+      }
+    },
+
+    "playlistsSubMenu": {
+      "type": "object",
+      "title": "Playlists",
+      "required": ["subMenu", "albums"],
+      "additionalProperties": false,
+      "properties": {
+        "subMenu": { "const": "Playlists" },
+        "albums": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/album" }
+        }
+      }
+    },
+
+    "album": {
+      "type": "object",
+      "required": ["id", "title", "titleBgColor", "description", "backgroundImage"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "description": "Stable slug, used in the /playlists/[album] route." },
+        "title": { "type": "string" },
+        "titleBgColor": { "type": "string", "description": "Title chip colour. Either a Tailwind class (e.g. 'bg-red-500') or a raw CSS colour (e.g. 'rgb(140,189,171)')." },
+        "description": { "type": "string" },
+        "backgroundImage": { "type": "string", "description": "Public path or URL to the cover image." },
+        "tracks": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/albumTrack" }
+        },
+        "linkToForm": { "type": "string", "description": "If present, the card is a call-to-action linking out instead of listing tracks." }
+      },
+      "oneOf": [
+        { "required": ["tracks"], "not": { "required": ["linkToForm"] } },
+        { "required": ["linkToForm"], "not": { "required": ["tracks"] } }
+      ]
+    },
+
+    "albumTrack": {
+      "type": "object",
+      "required": ["displayTitle", "filename"],
+      "additionalProperties": false,
+      "properties": {
+        "displayTitle": { "type": "string" },
+        "filename": { "type": "string", "description": "Exact audio filename as stored in R2. Must match the catalog." }
+      }
+    },
+
+    "topicsSubMenu": {
+      "type": "object",
+      "title": "Topics",
+      "required": ["subMenu", "hierarchy"],
+      "additionalProperties": false,
+      "properties": {
+        "subMenu": { "const": "Topics" },
+        "hierarchy": {
+          "type": "object",
+          "description": "Two-level map: category -> subcategory -> topic bucket.",
+          "additionalProperties": { "$ref": "#/definitions/topicSubCategories" }
+        }
+      }
+    },
+
+    "topicSubCategories": {
+      "type": "object",
+      "description": "Subcategory map within one category.",
+      "additionalProperties": { "$ref": "#/definitions/topicBucket" }
+    },
+
+    "topicBucket": {
+      "type": "object",
+      "required": ["lectures", "featured"],
+      "additionalProperties": false,
+      "properties": {
+        "lectures": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/topicLecture" }
+        },
+        "featured": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/topicFeatured" }
+        }
+      }
+    },
+
+    "topicLecture": {
+      "type": "object",
+      "required": ["subtopic", "altName", "category"],
+      "additionalProperties": false,
+      "properties": {
+        "subtopic": { "type": "string", "description": "Display label for the subtopic." },
+        "altName": { "type": "string", "description": "Shorter label for the UI. May be empty." },
+        "category": { "type": "string", "description": "Must match a real category string used in the catalog." }
+      }
+    },
+
+    "topicFeatured": {
+      "type": "object",
+      "required": ["title", "speaker", "filename"],
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": "string" },
+        "speaker": { "type": "string" },
+        "filename": { "type": "string", "description": "Exact audio filename. Must match the catalog." }
+      }
+    },
+
+    "featuredLectures": {
+      "type": "object",
+      "required": ["sectionTitle", "sectionSubtitle", "sectionImage", "items"],
+      "additionalProperties": false,
+      "properties": {
+        "sectionTitle": { "type": "string" },
+        "sectionSubtitle": { "type": "string" },
+        "sectionImage": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/featuredItem" }
+        }
+      }
+    },
+
+    "featuredItem": {
+      "type": "object",
+      "required": ["id", "title", "titleBgColor", "speaker", "image", "filename"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "titleBgColor": { "type": "string", "description": "Title chip colour. Tailwind class or raw CSS colour." },
+        "speaker": { "type": "string" },
+        "image": { "type": "string", "description": "Public path or URL to the speaker image." },
+        "filename": { "type": "string", "description": "Exact audio filename. Must match the catalog." }
+      }
+    },
+
+    "schaefferCollection": {
+      "type": "object",
+      "required": ["sectionTitle", "sectionSubtitle", "sectionImage", "people"],
+      "additionalProperties": false,
+      "properties": {
+        "sectionTitle": { "type": "string" },
+        "sectionSubtitle": { "type": "string" },
+        "sectionImage": { "type": "string" },
+        "people": {
+          "type": "object",
+          "description": "Map of person key -> collection. Keys are free-form ('francis', 'edith').",
+          "additionalProperties": { "$ref": "#/definitions/schaefferPerson" }
+        }
+      }
+    },
+
+    "schaefferPerson": {
+      "type": "object",
+      "required": ["speakerName", "intro", "items", "moreLink"],
+      "additionalProperties": false,
+      "properties": {
+        "speakerName": { "type": "string" },
+        "intro": { "type": "string" },
+        "items": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/schaefferItem" }
+        },
+        "moreLink": { "type": "string", "description": "Link to the full collection. Currently a placeholder ('x')." }
+      }
+    },
+
+    "schaefferItem": {
+      "type": "object",
+      "required": ["id", "title", "filename"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "filename": { "type": "string", "description": "Exact audio filename. Must match the catalog." }
+      }
+    }
+  }
+}
