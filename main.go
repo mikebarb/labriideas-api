@@ -470,8 +470,12 @@ func deployStatusHandler(w http.ResponseWriter, r *http.Request) {
 	var cfResp struct {
 		Success bool `json:"success"`
 		Result  []struct {
-			CreatedOn time.Time `json:"created_on"`
-			Status    string    `json:"status"`
+			CreatedOn   time.Time `json:"created_on"`
+			LatestStage struct {
+				Name    string     `json:"name"`
+				Status  string     `json:"status"`
+				EndedOn *time.Time `json:"ended_on"`
+			} `json:"latest_stage"`
 		} `json:"result"`
 		Errors []interface{} `json:"errors"`
 	}
@@ -484,26 +488,38 @@ func deployStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	latest := cfResp.Result[0]
+	stage := latest.LatestStage
 
-	// DEBUG LOG: Let's see the exact timestamps and status in Render logs
-	log.Printf("[ADMIN] CF Deploy Check -> commitAt: %s | latest.CreatedOn: %s | status: %s",
+	// DEBUG LOG: stage name matters — "queued"/"build"/"deploy" cycle,
+	// and the whole pipeline's final state is latest_stage.status.
+	log.Printf("[ADMIN] CF Deploy Check -> commitAt: %s | latest.CreatedOn: %s | stage: %s | stage.status: %s",
 		commitAt.Format(time.RFC3339),
 		latest.CreatedOn.Format(time.RFC3339),
-		latest.Status,
+		stage.Name,
+		stage.Status,
 	)
 
 	state := "building"
 	message := "Cloudflare build in progress..."
 
-	if latest.Status == "failure" {
-		state, message = "failed", "Cloudflare build failed — check the Pages dashboard."
-	} else if strings.EqualFold(latest.Status, "success") {
-		// Add a 15-second buffer against minor clock skew between Render and Cloudflare
+	// latest_stage.status is the CURRENT stage's state: idle/active while
+	// that stage runs, success when it completed, failure if it broke,
+	// canceled if it was aborted. The deployment is only "done" when the
+	// stage reports success/failure/canceled — active/idle mean "still
+	// building" regardless of which stage it's on.
+	switch strings.ToLower(stage.Status) {
+	case "success":
 		if latest.CreatedOn.After(commitAt.Add(-15 * time.Second)) {
 			state, message = "deployed", "New build is live."
 		} else {
 			state, message = "pending", "Waiting for the build to start..."
 		}
+	case "failure":
+		state, message = "failed", "Cloudflare build failed — check the Pages dashboard."
+	case "canceled":
+		state, message = "failed", "Cloudflare build was canceled — check the Pages dashboard."
+	default:
+		// "active", "idle", or empty while queued — keep polling.
 	}
 
 	w.Header().Set("Content-Type", "application/json")
