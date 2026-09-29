@@ -422,8 +422,14 @@ func updateMenuHandler(w http.ResponseWriter, r *http.Request) {
 // NEW build is live — closing the gap where a reload fired before the
 // build existed and served the previous (stale) bundle.
 //
+// Status lives one level deep in the Pages API: the deployment object
+// carries created_on, and its latest_stage object carries the live
+// status (name: queued/build/deploy, status: idle/active/success/
+// failure/canceled). The deployment is complete only when
+// latest_stage.status is a terminal state.
+//
 // Requires env vars: CLOUDFLARE_ACCOUNT_ID, CLOUDFLARE_PROJECT_NAME,
-// CLOUDFLARE_API_TOKEN (a Pages:Read-scoped token is sufficient).
+// CLOUDFLARE_API_TOKEN (Pages:Read scope is sufficient).
 func deployStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -435,6 +441,7 @@ func deployStatusHandler(w http.ResponseWriter, r *http.Request) {
 	lastMenuCommitMu.Unlock()
 
 	if commitAt.IsZero() {
+		// No menu commit has happened since the server booted.
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"state": "idle", "message": "No menu deploy in progress."})
 		return
@@ -444,16 +451,18 @@ func deployStatusHandler(w http.ResponseWriter, r *http.Request) {
 	project := os.Getenv("CLOUDFLARE_PROJECT_NAME")
 	token := os.Getenv("CLOUDFLARE_API_TOKEN")
 	if accountID == "" || project == "" || token == "" {
+		// Misconfiguration must be visible in server logs, not just the
+		// editor's "not configured" message.
 		log.Println("[ADMIN] Cloudflare status check skipped: environment variables not fully configured.")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"state": "unknown", "message": "Cloudflare status not configured on server."})
 		return
 	}
 
+	// Latest deployment for the project (list is newest-first).
 	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/pages/projects/%s/deployments?per_page=1", accountID, project)
 	req, err := http.NewRequestWithContext(r.Context(), "GET", url, nil)
 	if err != nil {
-		log.Printf("[ADMIN] Failed to build CF request: %v", err)
 		http.Error(w, "Failed to build status request", http.StatusInternalServerError)
 		return
 	}
@@ -461,65 +470,60 @@ func deployStatusHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
-		log.Printf("[ADMIN] Cloudflare API request failed (status: %v): %v", resp, err)
+		log.Printf("[ADMIN] Cloudflare API request failed (status: %d): %v", resp.StatusCode, err)
 		http.Error(w, "Failed to query Cloudflare status", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
+	// latest_stage is nested one level inside each deployment object.
 	var cfResp struct {
-		Success bool `json:"success"`
-		Result  []struct {
+		Result []struct {
 			CreatedOn   time.Time `json:"created_on"`
 			LatestStage struct {
-				Name    string     `json:"name"`
-				Status  string     `json:"status"`
-				EndedOn *time.Time `json:"ended_on"`
+				Name   string `json:"name"`
+				Status string `json:"status"`
 			} `json:"latest_stage"`
 		} `json:"result"`
-		Errors []interface{} `json:"errors"`
 	}
 
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	if err := json.Unmarshal(bodyBytes, &cfResp); err != nil || len(cfResp.Result) == 0 {
-		log.Printf("[ADMIN] Failed to parse CF response. Raw body: %s", string(bodyBytes))
+		log.Printf("[ADMIN] Failed to parse Cloudflare status response. Raw body: %s", string(bodyBytes))
 		http.Error(w, "Failed to parse Cloudflare status", http.StatusBadGateway)
 		return
 	}
 
 	latest := cfResp.Result[0]
-	stage := latest.LatestStage
-
-	// DEBUG LOG: stage name matters — "queued"/"build"/"deploy" cycle,
-	// and the whole pipeline's final state is latest_stage.status.
-	log.Printf("[ADMIN] CF Deploy Check -> commitAt: %s | latest.CreatedOn: %s | stage: %s | stage.status: %s",
-		commitAt.Format(time.RFC3339),
-		latest.CreatedOn.Format(time.RFC3339),
-		stage.Name,
-		stage.Status,
-	)
 
 	state := "building"
 	message := "Cloudflare build in progress..."
 
-	// latest_stage.status is the CURRENT stage's state: idle/active while
-	// that stage runs, success when it completed, failure if it broke,
-	// canceled if it was aborted. The deployment is only "done" when the
-	// stage reports success/failure/canceled — active/idle mean "still
-	// building" regardless of which stage it's on.
-	switch strings.ToLower(stage.Status) {
+	// latest_stage.status is the CURRENT stage's state. Terminal states:
+	// success / failure / canceled. Anything else (active, idle, empty
+	// while queued) means the build is still running — keep polling.
+	switch strings.ToLower(latest.LatestStage.Status) {
 	case "success":
+		// The 15s buffer absorbs minor clock skew between Render and
+		// Cloudflare so a SUCCESSFUL OLD build never reads as deployed
+		// for a commit that just happened.
 		if latest.CreatedOn.After(commitAt.Add(-15 * time.Second)) {
 			state, message = "deployed", "New build is live."
+			// One log line per OUTCOME — the deploy-half of the story the
+			// commit log line started. Per-poll logging stays out: the
+			// 6-second poll cadence is operational noise.
+			log.Printf("[ADMIN] Cloudflare deployment live for menu commit at %s", commitAt.Format(time.RFC3339))
 		} else {
+			// SUCCESS, but from BEFORE this commit — the build for this
+			// commit hasn't appeared as a deployment yet (or was skipped).
 			state, message = "pending", "Waiting for the build to start..."
 		}
 	case "failure":
 		state, message = "failed", "Cloudflare build failed — check the Pages dashboard."
+		log.Printf("[ADMIN] Cloudflare build FAILED for menu commit at %s", commitAt.Format(time.RFC3339))
 	case "canceled":
 		state, message = "failed", "Cloudflare build was canceled — check the Pages dashboard."
-	default:
-		// "active", "idle", or empty while queued — keep polling.
+		log.Printf("[ADMIN] Cloudflare build CANCELED for menu commit at %s", commitAt.Format(time.RFC3339))
 	}
 
 	w.Header().Set("Content-Type", "application/json")
