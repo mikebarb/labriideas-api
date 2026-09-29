@@ -435,7 +435,6 @@ func deployStatusHandler(w http.ResponseWriter, r *http.Request) {
 	lastMenuCommitMu.Unlock()
 
 	if commitAt.IsZero() {
-		// No menu commit has happened since the server booted.
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"state": "idle", "message": "No menu deploy in progress."})
 		return
@@ -445,16 +444,16 @@ func deployStatusHandler(w http.ResponseWriter, r *http.Request) {
 	project := os.Getenv("CLOUDFLARE_PROJECT_NAME")
 	token := os.Getenv("CLOUDFLARE_API_TOKEN")
 	if accountID == "" || project == "" || token == "" {
-		// Not configured — degrade honestly rather than hang the editor.
+		log.Println("[ADMIN] Cloudflare status check skipped: environment variables not fully configured.")
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"state": "unknown", "message": "Cloudflare status not configured on server."})
 		return
 	}
 
-	// Latest deployment for the project (list is newest-first).
 	url := fmt.Sprintf("https://api.cloudflare.com/client/v4/accounts/%s/pages/projects/%s/deployments?per_page=1", accountID, project)
 	req, err := http.NewRequestWithContext(r.Context(), "GET", url, nil)
 	if err != nil {
+		log.Printf("[ADMIN] Failed to build CF request: %v", err)
 		http.Error(w, "Failed to build status request", http.StatusInternalServerError)
 		return
 	}
@@ -462,38 +461,51 @@ func deployStatusHandler(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
 	if err != nil || resp.StatusCode != http.StatusOK {
-		log.Printf("[ADMIN] Cloudflare status check failed (status: %d): %v", resp.StatusCode, err)
+		log.Printf("[ADMIN] Cloudflare API request failed (status: %v): %v", resp, err)
 		http.Error(w, "Failed to query Cloudflare status", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
 	var cfResp struct {
-		Result []struct {
+		Success bool `json:"success"`
+		Result  []struct {
 			CreatedOn time.Time `json:"created_on"`
-			Status    string    `json:"status"` // "queued" | "building" | "success" | "failure"
+			Status    string    `json:"status"`
 		} `json:"result"`
+		Errors []interface{} `json:"errors"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&cfResp); err != nil || len(cfResp.Result) == 0 {
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(bodyBytes, &cfResp); err != nil || len(cfResp.Result) == 0 {
+		log.Printf("[ADMIN] Failed to parse CF response. Raw body: %s", string(bodyBytes))
 		http.Error(w, "Failed to parse Cloudflare status", http.StatusBadGateway)
 		return
 	}
 
 	latest := cfResp.Result[0]
+
+	// DEBUG LOG: Let's see the exact timestamps and status in Render logs
+	log.Printf("[ADMIN] CF Deploy Check -> commitAt: %s | latest.CreatedOn: %s | status: %s",
+		commitAt.Format(time.RFC3339),
+		latest.CreatedOn.Format(time.RFC3339),
+		latest.Status,
+	)
+
 	state := "building"
 	message := "Cloudflare build in progress..."
 
 	if latest.Status == "failure" {
 		state, message = "failed", "Cloudflare build failed — check the Pages dashboard."
 	} else if strings.EqualFold(latest.Status, "success") {
-		if latest.CreatedOn.After(commitAt) {
+		// Add a 15-second buffer against minor clock skew between Render and Cloudflare
+		if latest.CreatedOn.After(commitAt.Add(-15 * time.Second)) {
 			state, message = "deployed", "New build is live."
 		} else {
-			// SUCCESS, but from BEFORE this commit — the build for this
-			// commit hasn't appeared as a deployment yet (or was skipped).
 			state, message = "pending", "Waiting for the build to start..."
 		}
 	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"state": state, "message": message})
 }
