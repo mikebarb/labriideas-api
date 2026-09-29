@@ -1,246 +1,192 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "$id": "https://labriideas.pages.dev/schemas/menu.schema.json",
-  "title": "L'Abri Ideas Library - Menu Configuration",
-  "description": "Schema for src/data/menu.json. Defines navigation structure, playlists, topic hierarchy, featured lectures and the Schaeffer collection.",
+  "title": "L'Abri Menu Configuration",
   "type": "object",
-  "required": ["subMenus", "featuredLectures", "schaefferCollection"],
+  "required": [
+    "Topics",
+    "featuredLectures",
+    "Playlists",
+    "schaefferCollection",
+    "Contact L'Abri"
+  ],
   "additionalProperties": false,
   "properties": {
-    "subMenus": {
-      "type": "array",
-      "description": "Ordered top-level menu entries. Each entry is a different shape, identified by its subMenu label.",
-      "items": { "$ref": "#/definitions/subMenu" }
-    },
-    "featuredLectures": { "$ref": "#/definitions/featuredLectures" },
-    "schaefferCollection": { "$ref": "#/definitions/schaefferCollection" }
-  },
-
-  "definitions": {
-    "subMenu": {
-      "description": "A top-level menu entry. Exactly one of the three known shapes.",
-      "oneOf": [
-        { "$ref": "#/definitions/contactSubMenu" },
-        { "$ref": "#/definitions/playlistsSubMenu" },
-        { "$ref": "#/definitions/topicsSubMenu" }
-      ]
-    },
-
-    "contactSubMenu": {
+    "Topics": {
       "type": "object",
-      "title": "Contact L'Abri",
-      "required": ["subMenu", "description", "sites"],
+      "required": ["hierarchy"],
       "additionalProperties": false,
       "properties": {
-        "subMenu": { "const": "Contact L'Abri" },
-        "description": { "type": "string", "description": "Intro text shown above the list of centres." },
-        "sites": {
-          "type": "array",
-          "description": "Study centres listed on the Contact page.",
-          "items": { "$ref": "#/definitions/contactSite" }
-        }
-      }
-    },
-
-    "contactSite": {
-      "type": "object",
-      "required": ["id", "title", "details"],
-      "additionalProperties": false,
-      "properties": {
-        "id": { "type": "string", "description": "Stable slug used as a key/anchor. Lowercase, hyphenated." },
-        "title": { "type": "string" },
-        "details": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/contactDetail" }
-        }
-      }
-    },
-
-    "contactDetail": {
-      "type": "object",
-      "required": ["label", "value"],
-      "additionalProperties": false,
-      "properties": {
-        "label": { "type": "string", "description": "Left-hand label, e.g. 'Site', 'Email', 'Phone'. May be empty for a continuation row." },
-        "value": { "type": "string", "description": "Displayed value. May be empty for a heading-only row." },
-        "url": { "type": "string", "description": "Optional link target (https:// or mailto:). Omit to render as plain text." },
-        "note": { "type": "string", "description": "Optional qualifier rendered beside the value." }
-      }
-    },
-
-    "playlistsSubMenu": {
-      "type": "object",
-      "title": "Playlists",
-      "required": ["subMenu", "albums"],
-      "additionalProperties": false,
-      "properties": {
-        "subMenu": { "const": "Playlists" },
-        "albums": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/album" }
-        }
-      }
-    },
-
-    "album": {
-      "type": "object",
-      "required": ["id", "title", "titleBgColor", "description", "backgroundImage"],
-      "additionalProperties": false,
-      "properties": {
-        "id": { "type": "string", "description": "Stable slug, used in the /playlists/[album] route." },
-        "title": { "type": "string" },
-        "titleBgColor": { "type": "string", "description": "Title chip colour. Either a Tailwind class (e.g. 'bg-red-500') or a raw CSS colour (e.g. 'rgb(140,189,171)')." },
-        "description": { "type": "string" },
-        "backgroundImage": { "type": "string", "description": "Public path or URL to the cover image." },
-        "tracks": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/albumTrack" }
-        },
-        "linkToForm": { "type": "string", "description": "If present, the card is a call-to-action linking out instead of listing tracks." }
-      },
-      "oneOf": [
-        { "required": ["tracks"], "not": { "required": ["linkToForm"] } },
-        { "required": ["linkToForm"], "not": { "required": ["tracks"] } }
-      ]
-    },
-
-    "albumTrack": {
-      "type": "object",
-      "required": ["displayTitle", "filename"],
-      "additionalProperties": false,
-      "properties": {
-        "displayTitle": { "type": "string" },
-        "filename": { "type": "string", "description": "Exact audio filename as stored in R2. Must match the catalog." }
-      }
-    },
-
-    "topicsSubMenu": {
-      "type": "object",
-      "title": "Topics",
-      "required": ["subMenu", "hierarchy"],
-      "additionalProperties": false,
-      "properties": {
-        "subMenu": { "const": "Topics" },
         "hierarchy": {
           "type": "object",
-          "description": "Two-level map: category -> subcategory -> topic bucket.",
-          "additionalProperties": { "$ref": "#/definitions/topicSubCategories" }
+          "description": "Major themes mapping to sub-categories",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["lectures"],
+              "additionalProperties": false,
+              "properties": {
+                "featured": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["filename", "speaker", "title"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "filename": { "type": "string" },
+                      "speaker": { "type": "string" },
+                      "title": { "type": "string" }
+                    }
+                  }
+                },
+                "lectures": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["category", "subtopic"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "altName": { "type": "string" },
+                      "category": { "type": "string" },
+                      "subtopic": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },
-
-    "topicSubCategories": {
-      "type": "object",
-      "description": "Subcategory map within one category.",
-      "additionalProperties": { "$ref": "#/definitions/topicBucket" }
-    },
-
-    "topicBucket": {
-      "type": "object",
-      "required": ["lectures", "featured"],
-      "additionalProperties": false,
-      "properties": {
-        "lectures": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/topicLecture" }
-        },
-        "featured": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/topicFeatured" }
-        }
-      }
-    },
-
-    "topicLecture": {
-      "type": "object",
-      "required": ["subtopic", "altName", "category"],
-      "additionalProperties": false,
-      "properties": {
-        "subtopic": { "type": "string", "description": "Display label for the subtopic." },
-        "altName": { "type": "string", "description": "Shorter label for the UI. May be empty." },
-        "category": { "type": "string", "description": "Must match a real category string used in the catalog." }
-      }
-    },
-
-    "topicFeatured": {
-      "type": "object",
-      "required": ["title", "speaker", "filename"],
-      "additionalProperties": false,
-      "properties": {
-        "title": { "type": "string" },
-        "speaker": { "type": "string" },
-        "filename": { "type": "string", "description": "Exact audio filename. Must match the catalog." }
-      }
-    },
-
     "featuredLectures": {
       "type": "object",
-      "required": ["sectionTitle", "sectionSubtitle", "sectionImage", "items"],
+      "required": ["items", "sectionImage", "sectionSubtitle", "sectionTitle"],
       "additionalProperties": false,
       "properties": {
-        "sectionTitle": { "type": "string" },
-        "sectionSubtitle": { "type": "string" },
-        "sectionImage": { "type": "string" },
         "items": {
           "type": "array",
-          "items": { "$ref": "#/definitions/featuredItem" }
+          "items": {
+            "type": "object",
+            "required": ["filename", "id", "image", "speaker", "title", "titleBgColor"],
+            "additionalProperties": false,
+            "properties": {
+              "filename": { "type": "string" },
+              "id": { "type": "string" },
+              "image": { "type": "string" },
+              "speaker": { "type": "string" },
+              "title": { "type": "string" },
+              "titleBgColor": { "type": "string" }
+            }
+          }
+        },
+        "sectionImage": { "type": "string" },
+        "sectionSubtitle": { "type": "string" },
+        "sectionTitle": { "type": "string" }
+      }
+    },
+    "Playlists": {
+      "type": "object",
+      "required": ["albums"],
+      "additionalProperties": false,
+      "properties": {
+        "albums": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["backgroundImage", "description", "id", "title", "titleBgColor"],
+            "additionalProperties": false,
+            "properties": {
+              "backgroundImage": { "type": "string" },
+              "description": { "type": "string" },
+              "id": { "type": "string" },
+              "linkToForm": { "type": "string" },
+              "title": { "type": "string" },
+              "titleBgColor": { "type": "string" },
+              "tracks": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["displayTitle", "filename"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "displayTitle": { "type": "string" },
+                    "filename": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
         }
       }
     },
-
-    "featuredItem": {
-      "type": "object",
-      "required": ["id", "title", "titleBgColor", "speaker", "image", "filename"],
-      "additionalProperties": false,
-      "properties": {
-        "id": { "type": "string" },
-        "title": { "type": "string" },
-        "titleBgColor": { "type": "string", "description": "Title chip colour. Tailwind class or raw CSS colour." },
-        "speaker": { "type": "string" },
-        "image": { "type": "string", "description": "Public path or URL to the speaker image." },
-        "filename": { "type": "string", "description": "Exact audio filename. Must match the catalog." }
-      }
-    },
-
     "schaefferCollection": {
       "type": "object",
-      "required": ["sectionTitle", "sectionSubtitle", "sectionImage", "people"],
+      "required": ["people", "sectionImage", "sectionSubtitle", "sectionTitle"],
       "additionalProperties": false,
       "properties": {
-        "sectionTitle": { "type": "string" },
-        "sectionSubtitle": { "type": "string" },
-        "sectionImage": { "type": "string" },
         "people": {
           "type": "object",
-          "description": "Map of person key -> collection. Keys are free-form ('francis', 'edith').",
-          "additionalProperties": { "$ref": "#/definitions/schaefferPerson" }
-        }
-      }
-    },
-
-    "schaefferPerson": {
-      "type": "object",
-      "required": ["speakerName", "intro", "items", "moreLink"],
-      "additionalProperties": false,
-      "properties": {
-        "speakerName": { "type": "string" },
-        "intro": { "type": "string" },
-        "items": {
-          "type": "array",
-          "items": { "$ref": "#/definitions/schaefferItem" }
+          "additionalProperties": {
+            "type": "object",
+            "required": ["intro", "items", "moreLink", "speakerName"],
+            "additionalProperties": false,
+            "properties": {
+              "intro": { "type": "string" },
+              "moreLink": { "type": "string" },
+              "speakerName": { "type": "string" },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["filename", "id", "title"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "filename": { "type": "string" },
+                    "id": { "type": "string" },
+                    "title": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
         },
-        "moreLink": { "type": "string", "description": "Link to the full collection. Currently a placeholder ('x')." }
+        "sectionImage": { "type": "string" },
+        "sectionSubtitle": { "type": "string" },
+        "sectionTitle": { "type": "string" }
       }
     },
-
-    "schaefferItem": {
+    "Contact L'Abri": {
       "type": "object",
-      "required": ["id", "title", "filename"],
+      "required": ["description", "sites"],
       "additionalProperties": false,
       "properties": {
-        "id": { "type": "string" },
-        "title": { "type": "string" },
-        "filename": { "type": "string", "description": "Exact audio filename. Must match the catalog." }
+        "description": { "type": "string" },
+        "sites": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["details", "id", "title"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "details": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["value"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "label": { "type": "string" },
+                    "note": { "type": "string" },
+                    "url": { "type": "string" },
+                    "value": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
