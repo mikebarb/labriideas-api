@@ -59,13 +59,35 @@ type CrawlJob struct {
 	Message  string `json:"message"`
 }
 
+// Root-level validation contract derived from the schema — populated
+// at startup, used by updateMenuHandler's structural gate. Single
+// source of truth: the required root keys come from the schema's
+// "required" array, so schema revisions automatically update the
+// deploy gate with no Go code changes.
+var menuSchemaRequiredKeys []string
+
 func init() {
 	var err error
 	// Read and verify menu JSON schema at application startup
 	menuSchemaBytes, err = os.ReadFile("pkg/schema/menu.schema.json")
 	if err != nil {
 		log.Printf("⚠️  WARNING: Could not load pkg/schema/menu.schema.json: %v", err)
+		return
 	}
+
+	// Parse the schema's TOP-LEVEL contract only — we are not a full
+	// JSON Schema validator (the browser editor already does that via
+	// codemirror-json-schema). We extract the root "required" keys so
+	// the deploy gate enforces exactly what the schema declares,
+	// instead of a hard-coded key list that can drift from the schema.
+	var schemaDoc struct {
+		Required []string `json:"required"`
+	}
+	if err := json.Unmarshal(menuSchemaBytes, &schemaDoc); err != nil {
+		log.Printf("⚠️  WARNING: menu.schema.json is not valid JSON — root-key gate will use fallback: %v", err)
+		return
+	}
+	menuSchemaRequiredKeys = schemaDoc.Required
 }
 
 func main() {
@@ -249,6 +271,20 @@ func menuSchemaHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(menuSchemaBytes)
 }
 
+// requiredMenuKeys returns the root keys the deploy gate enforces.
+// Schema-derived when the schema loaded and declared a "required"
+// array; hard-coded fallback when the schema file is missing or
+// unreadable — the deploy path must never become ungated.
+func requiredMenuKeys() []string {
+	if len(menuSchemaRequiredKeys) > 0 {
+		return menuSchemaRequiredKeys
+	}
+	// FALLBACK: mirrors the current schema's required roots. Only
+	// engages if the schema failed to load at startup (deployment
+	// misconfiguration); the startup warning makes that visible.
+	return []string{"Topics", "featuredLectures", "Playlists", "schaefferCollection", "Contact L'Abri"}
+}
+
 // updateMenuHandler acts as the GitOps CI/CD orchestrator. It performs structural
 // sanity checks on incoming menu data and commits it directly to the GitHub repository.
 func updateMenuHandler(w http.ResponseWriter, r *http.Request) {
@@ -264,36 +300,19 @@ func updateMenuHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// ─── STRUCTURAL VALIDATION GATE ───
-	// Verify that critical root keys exist before sending to GitHub.
-	requiredRootKeys := []string{"subMenus", "featuredLectures", "schaefferCollection"}
-	for _, key := range requiredRootKeys {
+
+	// ─── STRUCTURAL VALIDATION GATE (SCHEMA-DRIVEN) ───
+	// Required root keys are read from menu.schema.json at startup —
+	// the same file served to the browser editor via
+	// menuSchemaHandler. Revising the schema (adding a section,
+	// renaming a key) automatically revises this gate; the two can no
+	// longer drift apart. Deep validation (nested objects, arrays,
+	// item fields) remains the editor's job client-side via
+	// codemirror-json-schema; this gate enforces only the root-level
+	// contract before the payload is committed to GitHub.
+	for _, key := range requiredMenuKeys() {
 		if _, exists := menuData[key]; !exists {
 			http.Error(w, fmt.Sprintf("Schema violation: missing root key '%s'", key), http.StatusBadRequest)
-			return
-		}
-	}
-
-	// Verify required sub-menus exist with exact naming.
-	subMenus, ok := menuData["subMenus"].([]interface{})
-	if !ok || len(subMenus) == 0 {
-		http.Error(w, "Schema violation: 'subMenus' must be a non-empty array", http.StatusBadRequest)
-		return
-	}
-
-	requiredSubMenus := []string{"Contact L'Abri", "Playlists", "Topics"}
-	foundSubMenus := make(map[string]bool)
-
-	for _, sm := range subMenus {
-		if smMap, ok := sm.(map[string]interface{}); ok {
-			if name, ok := smMap["subMenu"].(string); ok {
-				foundSubMenus[name] = true
-			}
-		}
-	}
-
-	for _, req := range requiredSubMenus {
-		if !foundSubMenus[req] {
-			http.Error(w, fmt.Sprintf("Critical section missing: 'subMenu': '%s' was not found. Check naming.", req), http.StatusBadRequest)
 			return
 		}
 	}
