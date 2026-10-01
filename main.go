@@ -300,13 +300,30 @@ func updateMenuHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var menuData map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&menuData); err != nil {
-		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+	// CHANGED: read the RAW request body BEFORE decoding. The decoded map
+	// is used for the structural validation gate below (key presence is
+	// order-insensitive), but the COMMIT (step 2) now uses the raw bytes.
+	// Rationale: unmarshal-then-marshal round-trips through a Go map,
+	// which serializes keys ALPHABETICALLY — silently discarding the
+	// admin's physical key ordering from the editor. The menu.json
+	// consumers (MegaMenu, TopicsTree) render sections in file order, so
+	// section reordering in the editor only survives deploy if the commit
+	// preserves the original byte order. json.Indent (step 2) reformats
+	// whitespace only and never re-sorts keys.
+	rawBody, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read request body", http.StatusBadRequest)
 		return
 	}
 
-	// ─── STRUCTURAL VALIDATION GATE ───
+	// Decode into a map for VALIDATION ONLY. Key order is lost here by
+	// design — the gate only checks that required root keys exist, and
+	// key-presence is identical regardless of ordering.
+	var menuData map[string]interface{}
+	if err := json.Unmarshal(rawBody, &menuData); err != nil {
+		http.Error(w, "Invalid JSON payload", http.StatusBadRequest)
+		return
+	}
 
 	// ─── STRUCTURAL VALIDATION GATE (SCHEMA-DRIVEN) ───
 	// Required root keys are read from menu.schema.json at startup —
@@ -365,13 +382,21 @@ func updateMenuHandler(w http.ResponseWriter, r *http.Request) {
 	getResp.Body.Close()
 
 	// 2. Format JSON and encode to Base64
-	formattedJSON, err := json.MarshalIndent(menuData, "", "  ")
-	if err != nil {
+	// CHANGED: json.Indent on the RAW body instead of json.MarshalIndent
+	// on the decoded map. MarshalIndent re-sorts all map keys
+	// alphabetically (Go maps are unordered); json.Indent only
+	// normalizes whitespace (indentation/newlines) and preserves key
+	// order byte-for-byte — so the admin's section ordering from the
+	// editor survives the commit. Note json.Indent also re-validates
+	// the JSON (it errors on malformed input), a harmless second check
+	// given Unmarshal already passed.
+	var formattedBuffer bytes.Buffer
+	if err := json.Indent(&formattedBuffer, rawBody, "", "  "); err != nil {
 		http.Error(w, "Failed to serialize JSON for commit", http.StatusInternalServerError)
 		return
 	}
 	// Append newline to match standard POSIX file conventions
-	formattedJSON = append(formattedJSON, '\n')
+	formattedJSON := append(formattedBuffer.Bytes(), '\n')
 	encodedContent := base64.StdEncoding.EncodeToString(formattedJSON)
 
 	// 3. Send commit PUT request to GitHub
