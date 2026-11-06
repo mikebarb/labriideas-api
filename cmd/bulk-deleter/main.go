@@ -56,6 +56,34 @@ func main() {
 	c := client.NewFromEnv()
 
 	// ==========================================
+	// STEP 0: Authenticate (admin framework)
+	// ==========================================
+	// Every admin endpoint this tool uses — crawl, presigned upload URL,
+	// metadata update — now requires a Bearer credential. The client resolves
+	// one in this order (see pkg/client/auth.go):
+	//   1. PUBLISHER_API_TOKEN   (static token, unattended runs)
+	//   2. ADMIN_API_TOKENS      (first uid:secret, shared with the server .env)
+	//   3. ADMIN_PASSWORDS       (first uid:secret, exchanged for a session)
+	//   4. Interactive no-echo password prompt
+	//
+	// SKIPPED only for a dry run that also skips crawling: that path calls
+	// nothing but the PUBLIC /api/catalog endpoint.
+	needAuth := !(isDryRun && skipCrawl)
+	if needAuth {
+		if err := c.EnsureAuthenticated(); err != nil {
+			log.Fatalf("Authentication failed: %v", err)
+		}
+		// Best effort: log.Fatalf calls os.Exit and skips this, in which case
+		// the server session simply expires on its own.
+		defer c.Logout()
+	}
+
+	client.Printf("Target: %s (%s)", c.BaseURL, client.EnvironmentLabel)
+	if needAuth {
+		client.Printf("%s", c.Identity())
+	}
+
+	// ==========================================
 	// STEP prep 0a: Initial crawl
 	// ==========================================
 	if !skipCrawl {

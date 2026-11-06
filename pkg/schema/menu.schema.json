@@ -1,0 +1,193 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "L'Abri Menu Configuration",
+  "type": "object",
+  "required": [
+    "Topics",
+    "featuredLectures",
+    "Playlists",
+    "schaefferCollection",
+    "Contact L'Abri"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "Topics": {
+      "type": "object",
+      "required": ["hierarchy"],
+      "additionalProperties": false,
+      "properties": {
+        "hierarchy": {
+          "type": "object",
+          "description": "Major themes mapping to sub-categories",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "required": ["lectures"],
+              "additionalProperties": false,
+              "properties": {
+                "featured": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["filename", "speaker", "title"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "filename": { "type": "string" },
+                      "speaker": { "type": "string" },
+                      "title": { "type": "string" }
+                    }
+                  }
+                },
+                "lectures": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["category", "subtopic"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "altName": { "type": "string" },
+                      "category": { "type": "string" },
+                      "subtopic": { "type": "string" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "featuredLectures": {
+      "type": "object",
+      "required": ["items", "sectionImage", "sectionSubtitle", "sectionTitle"],
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["filename", "id", "image", "speaker", "title", "titleBgColor"],
+            "additionalProperties": false,
+            "properties": {
+              "filename": { "type": "string" },
+              "id": { "type": "string" },
+              "image": { "type": "string" },
+              "speaker": { "type": "string" },
+              "title": { "type": "string" },
+              "titleBgColor": { "type": "string" }
+            }
+          }
+        },
+        "sectionImage": { "type": "string" },
+        "sectionSubtitle": { "type": "string" },
+        "sectionTitle": { "type": "string" }
+      }
+    },
+    "Playlists": {
+      "type": "object",
+      "required": ["albums"],
+      "additionalProperties": false,
+      "properties": {
+        "albums": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["backgroundImage", "description", "id", "title", "titleBgColor"],
+            "additionalProperties": false,
+            "properties": {
+              "backgroundImage": { "type": "string" },
+              "description": { "type": "string" },
+              "id": { "type": "string" },
+              "linkToForm": { "type": "string" },
+              "title": { "type": "string" },
+              "titleBgColor": { "type": "string" },
+              "tracks": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["displayTitle", "filename"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "displayTitle": { "type": "string" },
+                    "filename": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "schaefferCollection": {
+      "type": "object",
+      "required": ["people", "sectionImage", "sectionSubtitle", "sectionTitle"],
+      "additionalProperties": false,
+      "properties": {
+        "people": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "required": ["intro", "items", "moreLink", "speakerName"],
+            "additionalProperties": false,
+            "properties": {
+              "intro": { "type": "string" },
+              "moreLink": { "type": "string" },
+              "speakerName": { "type": "string" },
+              "items": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["filename", "id", "title"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "filename": { "type": "string" },
+                    "id": { "type": "string" },
+                    "title": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "sectionImage": { "type": "string" },
+        "sectionSubtitle": { "type": "string" },
+        "sectionTitle": { "type": "string" }
+      }
+    },
+    "Contact L'Abri": {
+      "type": "object",
+      "required": ["description", "sites"],
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": "string" },
+        "sites": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["details", "id", "title"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "details": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["value"],
+                  "additionalProperties": false,
+                  "properties": {
+                    "label": { "type": "string" },
+                    "note": { "type": "string" },
+                    "url": { "type": "string" },
+                    "value": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
