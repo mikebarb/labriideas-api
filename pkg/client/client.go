@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/joho/godotenv" // NEW: so local tools can read a .env file like the server does
 )
 
+// Client wraps the base URL and credentials of the labriideas server.
 // Client wraps the base URL and credentials of the labriideas server.
 type Client struct {
 	BaseURL string
@@ -58,7 +60,20 @@ func New() *Client {
 // keep their credentials in an ignored .env beside the binary, matching how
 // the server itself is configured. System env vars still take precedence
 // because godotenv does not overwrite existing variables.
+	return &Client{BaseURL: ""}
+}
+
+// NewFromEnv creates a client using:
+//   - API_BASE_URL env var (falls back to the production server)
+//   - PUBLISHER_API_TOKEN env var (the admin Bearer token)
+//
+// NEW: loads a local .env file first (if present), so ad-hoc CLI tools can
+// keep their credentials in an ignored .env beside the binary, matching how
+// the server itself is configured. System env vars still take precedence
+// because godotenv does not overwrite existing variables.
 func NewFromEnv() *Client {
+	_ = godotenv.Load() // Missing .env is not an error — fall back to system env
+
 	_ = godotenv.Load() // Missing .env is not an error — fall back to system env
 
 	base := osGetenv("API_BASE_URL")
@@ -192,6 +207,9 @@ func (c *Client) FetchCatalog() (map[string]map[string]string, map[string]string
 	// CHANGED: routed through c.get so the token attaches (harmless here —
 	// catalog is public — but keeps every call uniform).
 	resp, err := c.get(c.BaseURL + "/api/catalog")
+	// CHANGED: routed through c.get so the token attaches (harmless here —
+	// catalog is public — but keeps every call uniform).
+	resp, err := c.get(c.BaseURL + "/api/catalog")
 	if err != nil {
 		return empty, emptyHash, err
 	}
@@ -202,6 +220,7 @@ func (c *Client) FetchCatalog() (map[string]map[string]string, map[string]string
 		return empty, emptyHash, nil
 	}
 	if resp.StatusCode != http.StatusOK {
+		return empty, emptyHash, statusError(resp)
 		return empty, emptyHash, statusError(resp)
 	}
 
@@ -259,12 +278,15 @@ func (c *Client) FetchCatalog() (map[string]map[string]string, map[string]string
 func (c *Client) TriggerCrawl() (string, error) {
 	// CHANGED: routed through c.post for token attachment.
 	resp, err := c.post(c.BaseURL+"/api/start-crawl", nil)
+	// CHANGED: routed through c.post for token attachment.
+	resp, err := c.post(c.BaseURL+"/api/start-crawl", nil)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusAccepted {
+		return "", statusError(resp)
 		return "", statusError(resp)
 	}
 
@@ -285,6 +307,8 @@ var ErrCrawlJobLost = errors.New("crawl job no longer exists on the server (serv
 // PollCrawlStatus blocks until the job is completed or failed.
 func (c *Client) PollCrawlStatus(jobID string) error {
 	for {
+		// CHANGED: routed through c.get for token attachment.
+		resp, err := c.get(fmt.Sprintf("%s/api/crawl-status?job_id=%s", c.BaseURL, jobID))
 		// CHANGED: routed through c.get for token attachment.
 		resp, err := c.get(fmt.Sprintf("%s/api/crawl-status?job_id=%s", c.BaseURL, jobID))
 		if err != nil {
@@ -341,12 +365,16 @@ func (c *Client) DeleteTrack(filename string) error {
 	// CHANGED: routed through c.post for token attachment. This endpoint is
 	// admin-protected on the server, so without the token this call 401s.
 	resp, err := c.post(c.BaseURL+"/api/delete-track", bytes.NewBuffer(jsonPayload))
+	// CHANGED: routed through c.post for token attachment. This endpoint is
+	// admin-protected on the server, so without the token this call 401s.
+	resp, err := c.post(c.BaseURL+"/api/delete-track", bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		return statusError(resp)
 		return statusError(resp)
 	}
 	return nil
@@ -359,10 +387,22 @@ func (c *Client) GetSignedUploadURL(filename string) (string, error) {
 	// CHANGED: routed through c.get for token attachment. This endpoint is
 	// admin-protected on the server, so without the token this call 401s.
 	resp, err := c.get(c.BaseURL + "/api/get-upload-url?filename=" + encoded)
+
+	// CHANGED: routed through c.get for token attachment. This endpoint is
+	// admin-protected on the server, so without the token this call 401s.
+	resp, err := c.get(c.BaseURL + "/api/get-upload-url?filename=" + encoded)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
+
+	// FIXED: this endpoint is admin-protected. Previously a 401 response body
+	// ({"error":"unauthorized"}) would decode into an empty URL and surface
+	// as the misleading "empty presigned url received" error. Now the real
+	// cause is reported.
+	if resp.StatusCode != http.StatusOK {
+		return "", statusError(resp)
+	}
 
 	// FIXED: this endpoint is admin-protected. Previously a 401 response body
 	// ({"error":"unauthorized"}) would decode into an empty URL and surface
@@ -395,12 +435,16 @@ func (c *Client) UpdateMetadata(filename string, metadata map[string]string) err
 	// CHANGED: routed through c.post for token attachment. This endpoint is
 	// admin-protected on the server.
 	resp, err := c.post(c.BaseURL+"/api/update-metadata", bytes.NewBuffer(jsonPayload))
+	// CHANGED: routed through c.post for token attachment. This endpoint is
+	// admin-protected on the server.
+	resp, err := c.post(c.BaseURL+"/api/update-metadata", bytes.NewBuffer(jsonPayload))
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		return statusError(resp)
 		return statusError(resp)
 	}
 	return nil
